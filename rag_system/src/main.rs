@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use anyhow::{Context, Result};
 use rig::{
     embeddings::EmbeddingsBuilder,
@@ -8,6 +9,9 @@ use rig::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use rig::client::{CompletionClient, EmbeddingsClient, ProviderClient};
+use rig::providers::openai::TEXT_EMBEDDING_3_SMALL;
+
 
 #[derive(Embed, Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 struct Document {
@@ -16,14 +20,18 @@ struct Document {
     content: String,
 }
 
+/// Read and chunk the text of a PDF.
+///
+/// # Arguments
+/// * 'path' - Path to a PDF file
 fn load_pdf(path: PathBuf) -> Result<Vec<String>> {
     let mut chunks = Vec::new();
     let mut current_chunk = String::new();
     let chunk_size = 2000; // Approximately 2000 characters per chunk
     
     for entry in PdfFileLoader::with_glob(path.to_str().unwrap())?.read() {
-        let content = entry?;
-        
+        let mut content = entry?;
+        content.truncate(300000);
         // Split content into words
         let words: Vec<&str> = content.split_whitespace().collect();
         
@@ -60,44 +68,78 @@ async fn main() -> Result<()> {
     
     // Load PDFs using Rig's built-in PDF loader
     let documents_dir = std::env::current_dir()?.join("documents");
-    
-    let moores_law_chunks = load_pdf(documents_dir.join("Moores_Law_for_Everything.pdf"))
-        .context("Failed to load Moores_Law_for_Everything.pdf")?;
-    let last_question_chunks = load_pdf(documents_dir.join("The_Last_Question.pdf"))
-        .context("Failed to load The_Last_Question.pdf")?;
 
-    println!("Successfully loaded and chunked PDF documents");
+    let docs  = [
+        // "CFR-2024-title21-vol1.pdf", // 1-99
+        // "CFR-2024-title21-vol2.pdf", // 100-169
+        // "CFR-2024-title21-vol3.pdf", // 170-199
+        "CFR-2024-title21-vol4.pdf", // 200-299
+        // "CFR-2024-title21-vol5.pdf", // 300-499
+        // "CFR-2024-title21-vol6.pdf", // 500-599
+        // "CFR-2024-title21-vol7.pdf", // 
+    ];
+
+    let mut doc_to_chunks = HashMap::new();
+
+    for doc in docs.iter() {
+        let chunks = load_pdf(documents_dir.join(doc))?;
+        doc_to_chunks.insert(doc.to_string(), chunks);
+    }
+    
+    // let moores_law_chunks = load_pdf(documents_dir.join("Moores_Law_for_Everything.pdf"))
+    //     .context("Failed to load Moores_Law_for_Everything.pdf")?;
+    // let last_question_chunks = load_pdf(documents_dir.join("The_Last_Question.pdf"))
+    //     .context("Failed to load The_Last_Question.pdf")?;
+
+    println!("Successfully loaded and chunked {} PDF documents", doc_to_chunks.len());
 
     // Create embedding model
-    let model = openai_client.embedding_model(TEXT_EMBEDDING_ADA_002);
+    let model = openai_client.embedding_model(TEXT_EMBEDDING_3_SMALL);
 
     // Create embeddings builder
     let mut builder = EmbeddingsBuilder::new(model.clone());
 
-    // Add chunks from Moore's Law
-    for (i, chunk) in moores_law_chunks.into_iter().enumerate() {
-        builder = builder.document(Document {
-            id: format!("moores_law_{}", i),
-            content: chunk,
-        })?;
+    for (doc, chunks) in doc_to_chunks.iter() {
+        for (i, chunk) in chunks.iter().enumerate() {
+            let id = format!("{}_{}", doc, i);
+            let d = Document{
+                id: id.clone(),
+                content: chunk.clone(),
+            };
+            builder = builder.document(d)?;
+        }
     }
 
-    // Add chunks from The Last Question
-    for (i, chunk) in last_question_chunks.into_iter().enumerate() {
-        builder = builder.document(Document {
-            id: format!("last_question_{}", i),
-            content: chunk,
-        })?;
-    }
+    // // Add chunks from Moore's Law
+    // for (i, chunk) in moores_law_chunks.into_iter().enumerate() {
+    //     builder = builder.document(Document {
+    //         id: format!("moores_law_{}", i),
+    //         content: chunk,
+    //     })?;
+    // }
+    //
+    // // Add chunks from The Last Question
+    // for (i, chunk) in last_question_chunks.into_iter().enumerate() {
+    //     builder = builder.document(Document {
+    //         id: format!("last_question_{}", i),
+    //         content: chunk,
+    //     })?;
+    // }
+
+    println!("Added documents to builder");
 
     // Build embeddings
     let embeddings = builder.build().await?;
+    // TODO: Save embeddings
+
 
     println!("Successfully generated embeddings");
 
     // Create vector store and index
     let vector_store = InMemoryVectorStore::from_documents(embeddings);
+
     let index = vector_store.index(model);
+
 
     println!("Successfully created vector store and index");
 
